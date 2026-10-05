@@ -157,19 +157,21 @@ export class GoogleDriveService {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
-          redirect: 'manual',
+          redirect: 'follow',
           signal: controller.signal
         });
 
         let gasData: any = null;
-        if (postRes.status === 302 || postRes.status === 301) {
-          const redirectUrl = postRes.headers.get('location');
-          if (redirectUrl) {
-            const getRes = await fetch(redirectUrl, { signal: controller.signal });
-            gasData = await getRes.json();
-          }
-        } else if (postRes.ok) {
+        try {
           gasData = await postRes.json();
+        } catch {
+          if (postRes.status === 302 || postRes.status === 301) {
+            const redirectUrl = postRes.headers.get('location');
+            if (redirectUrl) {
+              const getRes = await fetch(redirectUrl, { signal: controller.signal });
+              gasData = await getRes.json();
+            }
+          }
         }
         clearTimeout(timeoutId);
 

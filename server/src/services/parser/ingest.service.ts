@@ -108,6 +108,36 @@ export class IngestService {
       );
     }
 
+    // Dual-sync metadata to Supabase PostgreSQL if connected
+    try {
+      const { query } = require('../../db/postgres');
+      query(`
+        INSERT INTO source_files (
+          id, google_drive_file_id, google_drive_folder_id, google_drive_web_link,
+          file_name, stored_file_name, mime_type, file_size, file_hash,
+          period_year, period_month, uploaded_by, processing_status, storage_path
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'COMPLETED', $13)
+        ON CONFLICT (id) DO UPDATE SET
+          google_drive_file_id = EXCLUDED.google_drive_file_id,
+          google_drive_web_link = EXCLUDED.google_drive_web_link,
+          processing_status = EXCLUDED.processing_status
+      `, [
+        sourceFileId,
+        driveResult.googleDriveFileId,
+        driveResult.googleDriveFolderId,
+        driveResult.webViewLink,
+        options.originalFileName,
+        driveResult.fileName,
+        options.mimeType,
+        driveResult.fileSize,
+        driveResult.fileHash,
+        currentYear,
+        currentMonth,
+        options.uploadedBy,
+        driveResult.localStoragePath
+      ]).catch((err: any) => console.warn('Supabase source_files sync warning:', err.message));
+    } catch {}
+
     // Step 3: Parse Records
     let records: ParsedPatientRecord[] = [];
     const isPDF = options.originalFileName.toLowerCase().endsWith('.pdf') || options.mimeType.includes('pdf');
