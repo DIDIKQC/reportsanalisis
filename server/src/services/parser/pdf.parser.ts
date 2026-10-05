@@ -28,6 +28,7 @@ if (typeof (globalThis as any).DOMMatrix === 'undefined') {
 }
 
 import fs from 'fs';
+import zlib from 'zlib';
 import { ParsedPatientRecord } from './excel.parser';
 import { classifyTestCategory } from './test-classifier';
 
@@ -57,6 +58,18 @@ const UPPER_KNOWN_UNITS = KNOWN_UNITS.map(u => ({ raw: u, upper: u.toUpperCase()
 
 export class PDFParser {
   private async extractTextFromPDF(filePath: string): Promise<string> {
+    // 1. Direct stream decompression (100% resilient across Node environments and serverless)
+    try {
+      const buffer = fs.readFileSync(filePath);
+      const directText = this.extractTextDirectlyFromPDF(buffer);
+      if (directText && directText.trim().length > 100) {
+        return directText;
+      }
+    } catch (directErr) {
+      console.warn('Direct stream extraction notice:', directErr);
+    }
+
+    // 2. Secondary fallback to pdf-parse library
     try {
       const pdfModule = require('pdf-parse');
       if (pdfModule && pdfModule.PDFParse) {
@@ -75,13 +88,86 @@ export class PDFParser {
         const parser = new pdfModule.default.PDFParse({ url: filePath });
         const res = await parser.getText();
         return res.text || '';
-      } else {
-        throw new Error('Format modul pdf-parse tidak dikenali.');
       }
     } catch (err: any) {
-      console.error('PDF parsing error in extractTextFromPDF:', err);
-      throw new Error(`Gagal membaca teks dokumen PDF: ${err.message}`);
+      console.warn('pdf-parse fallback notice:', err.message);
     }
+
+    throw new Error('Gagal mengekstrak teks dari dokumen PDF.');
+  }
+
+  private extractTextDirectlyFromPDF(buf: Buffer): string {
+    const str = buf.toString('binary');
+    const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    let match: RegExpExecArray | null;
+    const allLines: string[] = [];
+
+    while ((match = streamRegex.exec(str)) !== null) {
+      const rawStream = Buffer.from(match[1], 'binary');
+      let text = '';
+      try {
+        const decompressed = zlib.inflateSync(rawStream);
+        text = decompressed.toString('latin1');
+      } catch {
+        continue;
+      }
+
+      if (!text.includes('TJ') && !text.includes('Tj')) continue;
+
+      const btRegex = /BT([\s\S]*?)ET/g;
+      let btMatch: RegExpExecArray | null;
+      const pageItems: Array<{ x: number; y: number; text: string }> = [];
+
+      while ((btMatch = btRegex.exec(text)) !== null) {
+        const block = btMatch[1];
+        let x = 0;
+        let y = 0;
+        const tmMatch = block.match(/([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+Tm/);
+        if (tmMatch) {
+          x = parseFloat(tmMatch[5]);
+          y = parseFloat(tmMatch[6]);
+        }
+
+        const tjMatch = block.match(/\[([\s\S]*?)\]\s*TJ/);
+        if (tjMatch) {
+          const inner = tjMatch[1];
+          const strParts = [...inner.matchAll(/\((.*?)(?<!\\)\)/g)].map(m => m[1].replace(/\\([()\\])/g, '$1')).join('');
+          if (strParts) {
+            pageItems.push({ x, y, text: strParts });
+          }
+        } else {
+          const simpleTj = block.match(/\((.*?)(?<!\\)\)\s*Tj/);
+          if (simpleTj && simpleTj[1]) {
+            pageItems.push({ x, y, text: simpleTj[1].replace(/\\([()\\])/g, '$1') });
+          }
+        }
+      }
+
+      if (pageItems.length > 0) {
+        pageItems.sort((a, b) => b.y - a.y || a.x - b.x);
+        let currentY: number | null = null;
+        let currentLine: Array<{ x: number; y: number; text: string }> = [];
+
+        for (const item of pageItems) {
+          if (currentY === null || Math.abs(item.y - currentY) > 3) {
+            if (currentLine.length > 0) {
+              currentLine.sort((a, b) => a.x - b.x);
+              allLines.push(currentLine.map(it => it.text).join(' '));
+            }
+            currentY = item.y;
+            currentLine = [item];
+          } else {
+            currentLine.push(item);
+          }
+        }
+        if (currentLine.length > 0) {
+          currentLine.sort((a, b) => a.x - b.x);
+          allLines.push(currentLine.map(it => it.text).join(' '));
+        }
+      }
+    }
+
+    return allLines.join('\n');
   }
 
   public async previewLaboratoryPDF(filePath: string): Promise<PDFPreviewResult> {
