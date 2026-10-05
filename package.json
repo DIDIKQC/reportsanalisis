@@ -1,0 +1,22 @@
+{
+  "name": "laboratory-reporting-analytics-system",
+  "version": "1.0.0",
+  "description": "Production-Ready Laboratory Automated Reporting & Analytics System with Google Drive, Relational DB & Gemini AI",
+  "scripts": {
+    "start": "cd server && npm start",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "build:client": "cd client && npm run build",
+    "build:server": "cd server && npm run build",
+    "build": "npm run build:client && npm run build:server"
+  },
+  "keywords": [
+    "laboratory",
+    "hospital-analytics",
+    "gemini-ai",
+    "google-drive",
+    "medical-reports"
+  ],
+  "author": "Google Deepmind Advanced Agentic Coding",
+  "license": "ISC"
+}
