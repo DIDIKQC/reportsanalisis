@@ -6,6 +6,14 @@
   "framework": "vite",
   "rewrites": [
     {
+      "source": "/api/(.*)",
+      "destination": "https://items-extended-briefing-customers.trycloudflare.com/api/$1"
+    },
+    {
+      "source": "/storage/(.*)",
+      "destination": "https://items-extended-briefing-customers.trycloudflare.com/storage/$1"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
