@@ -10,6 +10,7 @@ export interface ParsedPatientRecord {
   age: number;
   ageUnit: string; // 'Th' | 'Bl' | 'Hr'
   medicalRecordNumber: string;
+  registrationNumber?: string;
   tests: Array<{ name: string; category: string }>;
   originUnit: string;
   unitType: 'RAWAT_JALAN' | 'RAWAT_INAP' | 'IGD';

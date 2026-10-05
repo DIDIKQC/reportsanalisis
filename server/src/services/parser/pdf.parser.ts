@@ -2,38 +2,129 @@ import fs from 'fs';
 import { ParsedPatientRecord } from './excel.parser';
 import { classifyTestCategory } from './test-classifier';
 
-export class PDFParser {
-  public async parseLaboratoryPDF(filePath: string): Promise<ParsedPatientRecord[]> {
-    let text = '';
+export interface PDFPreviewResult {
+  headers: string[];
+  totalRows: number;
+  totalPages: number;
+  mapping: {
+    mapped: Record<string, string>;
+    confidence: Record<string, number>;
+  };
+  sampleRecords: ParsedPatientRecord[];
+}
 
+const KNOWN_UNITS = [
+  'INSTALASI LABORATORIUM', 'LABORATORIUM', 'Unit IGD', 'IGD', 'ICU', 'HCU', 'NICU', 'NEONATUS',
+  'ZAAL A', 'ZAAL B', 'ZAAL C', 'ZAAL D', 'ZAAL E', 'ZAAL F', 'ZAAL ANAK', 'ZAAL BERSALIN',
+  'POLI PENYAKIT DALAM', 'POLI BEDAH', 'POLI ANAK', 'POLI KEBIDANAN', 'POLI KEBIDANAN & KANDUNGAN',
+  'POLI MATA', 'POLI THT', 'POLI SARAF', 'POLI JANTUNG', 'POLI GIGI', 'POLI KULIT DAN KELAMIN',
+  'POLI KULIT', 'POLI PARU', 'POLI UMUM', 'POLI VCT', 'POLI JIWA', 'POLI FISIOTERAPI',
+  'INSTALASI HEMODIALISA', 'HEMODIALISA', 'KAMAR OPERASI', 'OK', 'VK', 'BERSALIN',
+  'PERINATOLOGI', 'ISOLASI', 'VIP', 'KELAS 1', 'KELAS 2', 'KELAS 3', 'RAWAT JALAN', 'RAWAT INAP',
+  '---'
+].sort((a, b) => b.length - a.length);
+
+const UPPER_KNOWN_UNITS = KNOWN_UNITS.map(u => ({ raw: u, upper: u.toUpperCase() }));
+
+export class PDFParser {
+  private async extractTextFromPDF(filePath: string): Promise<string> {
     try {
       const pdfModule = require('pdf-parse');
       if (pdfModule && pdfModule.PDFParse) {
-        // v2.x class-based API
         const parser = new pdfModule.PDFParse({ url: filePath });
         const res = await parser.getText();
-        text = res.text || '';
+        return res.text || '';
       } else if (typeof pdfModule === 'function') {
-        // v1.x function-based API
         const dataBuffer = fs.readFileSync(filePath);
         const res = await pdfModule(dataBuffer);
-        text = res.text || '';
+        return res.text || '';
       } else if (typeof pdfModule?.default === 'function') {
         const dataBuffer = fs.readFileSync(filePath);
         const res = await pdfModule.default(dataBuffer);
-        text = res.text || '';
+        return res.text || '';
       } else if (pdfModule?.default?.PDFParse) {
         const parser = new pdfModule.default.PDFParse({ url: filePath });
         const res = await parser.getText();
-        text = res.text || '';
+        return res.text || '';
       } else {
         throw new Error('Format modul pdf-parse tidak dikenali.');
       }
     } catch (err: any) {
-      console.error('PDF parsing error in parseLaboratoryPDF:', err);
+      console.error('PDF parsing error in extractTextFromPDF:', err);
       throw new Error(`Gagal membaca teks dokumen PDF: ${err.message}`);
     }
+  }
 
+  public async previewLaboratoryPDF(filePath: string): Promise<PDFPreviewResult> {
+    const text = await this.extractTextFromPDF(filePath);
+    const records = this.parseTextToRecords(text);
+    const pageMatch = text.match(/--\s*\d+\s*of\s*(\d+)\s*--/);
+    const totalPages = pageMatch ? parseInt(pageMatch[1], 10) : Math.max(1, Math.ceil(records.length / 40));
+
+    const isTATReport = text.includes('Laporan TAT') || text.includes('No. Pasien') || text.includes('TAT (Menit)');
+
+    if (isTATReport) {
+      const headers = ['No.', 'No. Pasien', 'No. Lab', 'Nama', 'Ruang', 'Pemeriksaan', 'Cito / Non Cito', 'TAT (Menit)'];
+      const mapped: Record<string, string> = {
+        'No.': 'row_number',
+        'No. Pasien': 'medical_record_number',
+        'No. Lab': 'registration_number',
+        'Nama': 'patient_name',
+        'Ruang': 'origin_unit',
+        'Pemeriksaan': 'examinations',
+        'Cito / Non Cito': 'guarantor',
+        'TAT (Menit)': 'tat_minutes'
+      };
+      const confidence: Record<string, number> = {
+        'No.': 1.0,
+        'No. Pasien': 1.0,
+        'No. Lab': 1.0,
+        'Nama': 1.0,
+        'Ruang': 1.0,
+        'Pemeriksaan': 1.0,
+        'Cito / Non Cito': 1.0,
+        'TAT (Menit)': 1.0
+      };
+
+      return {
+        headers,
+        totalRows: records.length,
+        totalPages,
+        mapping: { mapped, confidence },
+        sampleRecords: records.slice(0, 10)
+      };
+    }
+
+    // Default generic PDF preview
+    const headers = ['No.', 'Tanggal Periksa', 'Nama Pasien', 'No RM', 'Ruang / Asal', 'Pemeriksaan'];
+    const mapped: Record<string, string> = {
+      'No.': 'row_number',
+      'Tanggal Periksa': 'order_date',
+      'Nama Pasien': 'patient_name',
+      'No RM': 'medical_record_number',
+      'Ruang / Asal': 'origin_unit',
+      'Pemeriksaan': 'examinations'
+    };
+    const confidence: Record<string, number> = {
+      'No.': 1.0,
+      'Tanggal Periksa': 1.0,
+      'Nama Pasien': 1.0,
+      'No RM': 1.0,
+      'Ruang / Asal': 1.0,
+      'Pemeriksaan': 1.0
+    };
+
+    return {
+      headers,
+      totalRows: records.length,
+      totalPages,
+      mapping: { mapped, confidence },
+      sampleRecords: records.slice(0, 10)
+    };
+  }
+
+  public async parseLaboratoryPDF(filePath: string): Promise<ParsedPatientRecord[]> {
+    const text = await this.extractTextFromPDF(filePath);
     return this.parseTextToRecords(text);
   }
 
@@ -41,18 +132,33 @@ export class PDFParser {
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
     const records: ParsedPatientRecord[] = [];
 
-    // Match rows starting with a number and date: e.g. "1 01/11/2023 SUCIPTO BIN WIRO SUYOTO 72Th ... POLI PENYAKIT DALAM"
-    const rowRegex = /^(\d+)\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+)$/;
+    // Format 1: Laporan TAT format:
+    // e.g. "1 257766 2601010001 MARYONO ICU Natrium; Kalium Non cito 90"
+    const tatRowRegex = /^(\d+)\s+(\d{4,10})\s+(\d{8,12})\s+(.+?)\s+(Non cito|Cito)\s+(-|-?\d+)$/i;
 
+    // Format 2: Register Pasien date format:
+    // e.g. "1 01/11/2023 SUCIPTO BIN WIRO SUYOTO 72Th ... POLI PENYAKIT DALAM"
+    const dateRowRegex = /^(\d+)\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+)$/;
+
+    // Check if format 1 matches
+    let tatMatchCount = 0;
+    for (let i = 0; i < Math.min(100, lines.length); i++) {
+      if (tatRowRegex.test(lines[i])) tatMatchCount++;
+    }
+
+    if (tatMatchCount > 0) {
+      return this.parseTATFormat(lines);
+    }
+
+    // Otherwise use Format 2
     let currentRecord: Partial<ParsedPatientRecord> & { rawLines: string[] } | null = null;
-
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      const match = line.match(rowRegex);
+      const match = line.match(dateRowRegex);
 
       if (match) {
         if (currentRecord) {
-          records.push(this.finalizeRecord(currentRecord));
+          records.push(this.finalizeRecordFormat2(currentRecord));
         }
 
         const rowNum = parseInt(match[1], 10);
@@ -66,21 +172,198 @@ export class PDFParser {
           rawLines: [restOfLine]
         };
       } else if (currentRecord) {
-        // Line continuation (for multiline patient name, examinations, or origin)
         currentRecord.rawLines.push(line);
       }
     }
 
     if (currentRecord) {
-      records.push(this.finalizeRecord(currentRecord));
+      records.push(this.finalizeRecordFormat2(currentRecord));
     }
 
     return records;
   }
 
-  private finalizeRecord(curr: any): ParsedPatientRecord {
+  private parseTATFormat(lines: string[]): ParsedPatientRecord[] {
+    const tatRowRegex = /^(\d+)\s+(\d{4,10})\s+(\d{8,12})\s+(.+?)\s+(Non cito|Cito)\s+(-|-?\d+)$/i;
+    const records: ParsedPatientRecord[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (
+        line.includes('No. Pasien') ||
+        line.includes('Laporan TAT') ||
+        /--\s*\d+\s*of\s*\d+\s*--/.test(line)
+      ) {
+        continue;
+      }
+
+      const match = line.match(tatRowRegex);
+      if (!match) continue;
+
+      const rowNo = parseInt(match[1], 10);
+      const noPasien = match[2];
+      const noLab = match[3];
+      const middle = match[4];
+      const citoStr = match[5];
+      const tatStr = match[6];
+
+      // Extract Unit & Tests from middle
+      const upperMiddle = middle.toUpperCase();
+      let matchedUnit = 'Unit IGD';
+      let unitIdx = -1;
+      for (const item of UPPER_KNOWN_UNITS) {
+        const idx = upperMiddle.indexOf(item.upper);
+        if (idx !== -1) {
+          matchedUnit = item.raw;
+          unitIdx = idx;
+          break;
+        }
+      }
+
+      let patientName = middle;
+      let rawTestsStr = '';
+      if (unitIdx !== -1) {
+        patientName = middle.substring(0, unitIdx).trim();
+        rawTestsStr = middle.substring(unitIdx + matchedUnit.length).trim();
+      } else {
+        // Fallback: take last 2 words as unit
+        const words = middle.split(' ');
+        if (words.length > 2) {
+          patientName = words.slice(0, words.length - 2).join(' ');
+          matchedUnit = words.slice(words.length - 2).join(' ');
+        }
+      }
+
+      if (!patientName) patientName = `Pasien ${noPasien}`;
+
+      // Date parsing from No. Lab (e.g. 2601010001 -> 2026-01-01)
+      let orderDate = new Date().toISOString().split('T')[0];
+      if (noLab.length >= 6) {
+        const yy = noLab.substring(0, 2);
+        const mm = noLab.substring(2, 4);
+        const dd = noLab.substring(4, 6);
+        const monthNum = parseInt(mm, 10);
+        const dayNum = parseInt(dd, 10);
+        if (monthNum >= 1 && monthNum <= 12 && dayNum >= 1 && dayNum <= 31) {
+          orderDate = `20${yy}-${mm}-${dd}`;
+        }
+      }
+
+      // Unit type resolution
+      const originUnit = matchedUnit === '---' ? 'Unit IGD' : matchedUnit;
+      const u = originUnit.toUpperCase();
+      let unitType: 'RAWAT_JALAN' | 'RAWAT_INAP' | 'IGD' = 'RAWAT_JALAN';
+      if (u.includes('IGD')) {
+        unitType = 'IGD';
+      } else if (
+        u.includes('ZAAL') ||
+        u.includes('ICU') ||
+        u.includes('HCU') ||
+        u.includes('NICU') ||
+        u.includes('NEONATUS') ||
+        u.includes('KMR') ||
+        u.includes('PERINATOLOGI') ||
+        u.includes('ISOLASI')
+      ) {
+        unitType = 'RAWAT_INAP';
+      }
+
+      // Cito and TAT parsing
+      const isCito = citoStr.toLowerCase().includes('cito') && !citoStr.toLowerCase().includes('non');
+      let tatMinutes: number | undefined = undefined;
+      if (tatStr !== '-') {
+        const parsedMins = parseInt(tatStr, 10);
+        tatMinutes = isNaN(parsedMins) ? undefined : Math.max(0, parsedMins);
+      }
+
+      // Gender inference
+      let gender: 'L' | 'P' = 'L';
+      const upperName = patientName.toUpperCase();
+      if (
+        upperName.includes('NY.') ||
+        upperName.includes('NYA') ||
+        upperName.includes('IBU') ||
+        upperName.includes('BINTI') ||
+        upperName.includes('SITI') ||
+        upperName.includes('SRI') ||
+        upperName.includes('NUR') ||
+        upperName.includes('DEWI') ||
+        upperName.includes('PUTRI') ||
+        upperName.includes('MARSIAH') ||
+        upperName.includes('TARIASIH') ||
+        upperName.includes('WASTINI') ||
+        upperName.includes('LILIS')
+      ) {
+        gender = 'P';
+      }
+
+      // Tests parsing
+      const rawTests = rawTestsStr
+        .replace(/^[,.\s]+|[,.\s]+$/g, '')
+        .split(/[,;\n]+/)
+        .map(t => t.trim())
+        .filter(t => t.length > 0 && t !== '-');
+
+      const tests = rawTests.length > 0
+        ? rawTests.map(t => ({ name: t, category: classifyTestCategory(t) }))
+        : [{ name: 'Pemeriksaan Laboratorium', category: 'Kimia Darah' }];
+
+      records.push({
+        rowNumber: rowNo,
+        orderDate,
+        patientName,
+        gender,
+        age: 35,
+        ageUnit: 'Th',
+        medicalRecordNumber: noPasien,
+        registrationNumber: noLab,
+        tests,
+        originUnit,
+        unitType,
+        guarantor: isCito ? 'CITO / EMERGENSI' : 'BPJS / UMUM',
+        tatMinutes,
+        sampleTakenDatetime: `${orderDate} 08:30:00`,
+        resultCompletedDatetime: tatMinutes !== undefined
+          ? this.addMinutesToTimeString(`${orderDate} 08:30:00`, tatMinutes)
+          : `${orderDate} 09:30:00`,
+        rawRecord: {
+          'No.': rowNo,
+          'No. Pasien': noPasien,
+          'No. Lab': noLab,
+          'Nama': patientName,
+          'Ruang': originUnit,
+          'Pemeriksaan': rawTestsStr || tests.map(t => t.name).join('; '),
+          'Cito / Non Cito': citoStr,
+          'TAT (Menit)': tatStr === '-' ? '-' : (tatMinutes ?? '-')
+        },
+        validationErrors: []
+      });
+    }
+
+    return records;
+  }
+
+  private addMinutesToTimeString(dateTimeStr: string, minutes: number): string {
+    try {
+      const [datePart, timePart] = dateTimeStr.split(' ');
+      const [year, month, day] = datePart.split('-').map(Number);
+      const [hours, mins, secs] = timePart.split(':').map(Number);
+      const d = new Date(year, month - 1, day, hours, mins, secs);
+      d.setMinutes(d.getMinutes() + minutes);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const dt = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${y}-${m}-${dt} ${hh}:${mm}:${ss}`;
+    } catch {
+      return dateTimeStr;
+    }
+  }
+
+  private finalizeRecordFormat2(curr: any): ParsedPatientRecord {
     const fullText = curr.rawLines.join(' ');
-    // Extract Age & Gender (looks for patterns like "72Th", "9Th", "62Th", "83Th", "7Bl", "9Hr", "0Hr")
     const ageMatch = fullText.match(/(\d+)\s*(Th|Bl|Hr)/i);
     let age = 0;
     let ageUnit = 'Th';
@@ -95,41 +378,31 @@ export class PDFParser {
       patientName = fullText.substring(0, ageIdx).trim();
       remaining = fullText.substring(ageIdx + ageMatch[0].length).trim();
       
-      // Determine gender based on name suffix or columns if available
+      const upperName = patientName.toUpperCase();
       if (
-        patientName.includes('BINTI') ||
-        patientName.includes('NY.') ||
-        patientName.includes('IBU') ||
-        patientName.includes('SITI') ||
-        patientName.includes('SRI') ||
-        patientName.includes('NUR') ||
-        patientName.includes('DEWI')
+        upperName.includes('BINTI') ||
+        upperName.includes('NY.') ||
+        upperName.includes('IBU') ||
+        upperName.includes('SITI') ||
+        upperName.includes('SRI') ||
+        upperName.includes('NUR') ||
+        upperName.includes('DEWI')
       ) {
         gender = 'P';
-      } else {
-        gender = 'L';
       }
     }
 
-    // Origin unit is typically at the end of the text
-    // E.g. "POLI PENYAKIT DALAM", "Unit IGD", "ZA.K.3 ZAAL A", "KMR.1.2 ZAAL E", "POLI KULIT DAN KELAMIN", etc.
     let originUnit = 'Unit IGD';
-    const unitKeywords = [
-      'POLI PENYAKIT DALAM', 'POLI KULIT DAN KELAMIN', 'POLI SARAF', 'POLI ANAK',
-      'POLI UMUM', 'POLI KEBIDANAN', 'INSTALASI HEMODIALISA', 'POLI VCT', 'POLI THT',
-      'POLI BEDAH', 'POLI MATA', 'Unit IGD', 'IGD', 'ICU', 'HCU', 'NEONATUS', 'NICU', 'ZAAL'
-    ];
-
-    for (const kw of unitKeywords) {
-      if (remaining.toUpperCase().includes(kw)) {
-        const idx = remaining.toUpperCase().lastIndexOf(kw);
+    const upperRemaining = remaining.toUpperCase();
+    for (const item of UPPER_KNOWN_UNITS) {
+      if (upperRemaining.includes(item.upper)) {
+        const idx = upperRemaining.lastIndexOf(item.upper);
         originUnit = remaining.substring(idx).trim();
         remaining = remaining.substring(0, idx).trim();
         break;
       }
     }
 
-    // Anything left in remaining is tests
     const rawTests: string[] = remaining
       .replace(/^[,.\s]+|[,.\s]+$/g, '')
       .split(/[,;\n]+/)
@@ -141,7 +414,6 @@ export class PDFParser {
       category: classifyTestCategory(t)
     }));
 
-    // Resolve Unit Type
     let unitType: 'RAWAT_JALAN' | 'RAWAT_INAP' | 'IGD' = 'RAWAT_JALAN';
     const u = originUnit.toUpperCase();
     if (u.includes('IGD')) unitType = 'IGD';

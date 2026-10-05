@@ -237,13 +237,15 @@ export class IngestService {
 
         const examId = `exam-${crypto.randomUUID()}`;
         const regDateTime = `${rec.orderDate} 08:30:00`;
+        const regNumber = rec.registrationNumber || `REG-${rec.rowNumber}`;
+
         insertExam.run(
           examId,
           options.uploadedBy,
           patientId,
           sourceFileId,
           batchId,
-          `REG-${rec.rowNumber}`,
+          regNumber,
           rec.orderDate,
           regDateTime,
           rec.originUnit,
@@ -252,7 +254,7 @@ export class IngestService {
           rec.doctorName || null
         );
 
-        // Insert results & calculate deterministic realistic TAT
+        // Insert results
         for (const test of rec.tests) {
           const resultId = `res-${crypto.randomUUID()}`;
           const isCritical = test.name.toLowerCase().includes('nilai kritis') || false;
@@ -262,7 +264,7 @@ export class IngestService {
         // Insert TAT only if the uploaded file explicitly has a TAT column
         if (rec.tatMinutes !== undefined && rec.tatMinutes !== null && !isNaN(rec.tatMinutes)) {
           const primaryCategory = rec.tests[0]?.category || 'Hematologi';
-          const serviceType = rec.unitType === 'IGD' ? 'CITO' : 'REGULER';
+          const serviceType = rec.unitType === 'IGD' ? 'CITO' : (rec.guarantor.includes('CITO') ? 'CITO' : 'REGULER');
           const target = tatTargets.find(t => t.category === primaryCategory && t.service_type === serviceType) || { target_minutes: serviceType === 'CITO' ? 30 : 60 };
           const isCompliant = rec.tatMinutes <= target.target_minutes;
 
@@ -308,6 +310,11 @@ export class IngestService {
 
     runImport();
 
+    // Async batch sync to Supabase PostgreSQL
+    this.syncToPostgres(sourceFileId, batchId, records, options.uploadedBy, tatTargets).catch(err => {
+      console.warn('Supabase dual-sync notice:', err.message);
+    });
+
     return {
       sourceFileId,
       batchId,
@@ -323,6 +330,191 @@ export class IngestService {
       status: 'SUCCESS',
       message: `Berhasil memproses ${validCount} dari ${records.length} data pasien laboratorium.`
     };
+  }
+
+  private async syncToPostgres(
+    sourceFileId: string,
+    batchId: string,
+    records: ParsedPatientRecord[],
+    uploadedBy: string,
+    tatTargets: any[]
+  ): Promise<void> {
+    try {
+      const { query } = require('../../db/postgres');
+
+      // 1. Ensure source_files exists in Postgres first
+      const fileRow = db.prepare('SELECT * FROM source_files WHERE id = ?').get(sourceFileId) as any;
+      if (fileRow) {
+        await query(`
+          INSERT INTO source_files (
+            id, google_drive_file_id, google_drive_folder_id, google_drive_web_link,
+            file_name, stored_file_name, mime_type, file_size, file_hash,
+            period_year, period_month, uploaded_by, processing_status, storage_path
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'COMPLETED', $13)
+          ON CONFLICT (id) DO UPDATE SET
+            google_drive_file_id = EXCLUDED.google_drive_file_id,
+            google_drive_web_link = EXCLUDED.google_drive_web_link,
+            processing_status = EXCLUDED.processing_status
+        `, [
+          fileRow.id,
+          fileRow.google_drive_file_id,
+          fileRow.google_drive_folder_id,
+          fileRow.google_drive_web_link,
+          fileRow.file_name,
+          fileRow.stored_file_name,
+          fileRow.mime_type,
+          fileRow.file_size,
+          fileRow.file_hash,
+          fileRow.period_year,
+          fileRow.period_month,
+          fileRow.uploaded_by,
+          fileRow.storage_path
+        ]);
+      }
+
+      // 2. Insert upload_batches
+      await query(`
+        INSERT INTO upload_batches (
+          id, source_file_id, total_records, valid_records,
+          warning_records, error_records, duplicate_records, status
+        ) VALUES ($1, $2, $3, $4, 0, 0, 0, 'COMPLETED')
+        ON CONFLICT (id) DO UPDATE SET valid_records = EXCLUDED.valid_records, status = 'COMPLETED'
+      `, [batchId, sourceFileId, records.length, records.length]);
+
+      // 2. Batch Patients (unique by mrn)
+      const uniquePatientsMap = new Map<string, ParsedPatientRecord>();
+      for (const rec of records) {
+        if (!uniquePatientsMap.has(rec.medicalRecordNumber)) {
+          uniquePatientsMap.set(rec.medicalRecordNumber, rec);
+        }
+      }
+
+      const patientList = Array.from(uniquePatientsMap.values());
+      const pChunkSize = 100;
+      for (let i = 0; i < patientList.length; i += pChunkSize) {
+        const chunk = patientList.slice(i, i + pChunkSize);
+        const values: any[] = [];
+        const placeholders: string[] = [];
+        let pIdx = 1;
+
+        for (const p of chunk) {
+          const patId = `pat-${p.medicalRecordNumber}`;
+          placeholders.push(`($${pIdx}, $${pIdx + 1}, $${pIdx + 2}, $${pIdx + 3}, $${pIdx + 4}, $${pIdx + 5}, $${pIdx + 6})`);
+          values.push(patId, uploadedBy, p.medicalRecordNumber, p.patientName, p.gender, p.age, p.ageUnit);
+          pIdx += 7;
+        }
+
+        if (placeholders.length > 0) {
+          await query(`
+            INSERT INTO patients (id, user_id, medical_record_number, name, gender, age, age_unit)
+            VALUES ${placeholders.join(', ')}
+            ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, age = EXCLUDED.age
+          `, values);
+        }
+      }
+
+      // 3. Batch Examinations, Lab Results, and TAT Records in chunks of 100
+      const examChunkSize = 100;
+      for (let i = 0; i < records.length; i += examChunkSize) {
+        const chunk = records.slice(i, i + examChunkSize);
+
+        const examPlaceholders: string[] = [];
+        const examValues: any[] = [];
+        let eIdx = 1;
+
+        const labPlaceholders: string[] = [];
+        const labValues: any[] = [];
+        let lIdx = 1;
+
+        const tatPlaceholders: string[] = [];
+        const tatValues: any[] = [];
+        let tIdx = 1;
+
+        for (const rec of chunk) {
+          const examId = `exam-${crypto.randomUUID()}`;
+          const patientId = `pat-${rec.medicalRecordNumber}`;
+          const regDateTime = `${rec.orderDate} 08:30:00`;
+          const regNo = rec.registrationNumber || `REG-${rec.rowNumber}`;
+
+          examPlaceholders.push(`($${eIdx}, $${eIdx + 1}, $${eIdx + 2}, $${eIdx + 3}, $${eIdx + 4}, $${eIdx + 5}, $${eIdx + 6}, $${eIdx + 7}, $${eIdx + 8}, $${eIdx + 9}, $${eIdx + 10}, $${eIdx + 11}, 'COMPLETED')`);
+          examValues.push(
+            examId,
+            uploadedBy,
+            patientId,
+            sourceFileId,
+            batchId,
+            regNo,
+            rec.orderDate,
+            regDateTime,
+            rec.originUnit,
+            rec.unitType,
+            rec.guarantor,
+            rec.doctorName || null
+          );
+          eIdx += 12;
+
+          for (const test of rec.tests) {
+            const isCritical = test.name.toLowerCase().includes('nilai kritis');
+            labPlaceholders.push(`($${lIdx}, $${lIdx + 1}, $${lIdx + 2}, $${lIdx + 3}, $${lIdx + 4}, $${lIdx + 5})`);
+            labValues.push(`res-${crypto.randomUUID()}`, examId, test.name, test.category, 'Hasil Terverifikasi', isCritical ? 'CRITICAL' : 'NORMAL');
+            lIdx += 6;
+          }
+
+          if (rec.tatMinutes !== undefined && rec.tatMinutes !== null && !isNaN(rec.tatMinutes)) {
+            const primaryCategory = rec.tests[0]?.category || 'Hematologi';
+            const serviceType = rec.unitType === 'IGD' ? 'CITO' : (rec.guarantor.includes('CITO') ? 'CITO' : 'REGULER');
+            const target = tatTargets.find(t => t.category === primaryCategory && t.service_type === serviceType) || { target_minutes: serviceType === 'CITO' ? 30 : 60 };
+            const isCompliant = rec.tatMinutes <= target.target_minutes;
+
+            tatPlaceholders.push(`($${tIdx}, $${tIdx + 1}, $${tIdx + 2}, $${tIdx + 3}, $${tIdx + 4}, $${tIdx + 5}, $${tIdx + 6}, $${tIdx + 7}, $${tIdx + 8})`);
+            tatValues.push(
+              `tat-${crypto.randomUUID()}`,
+              examId,
+              primaryCategory,
+              serviceType,
+              rec.sampleTakenDatetime || `${rec.orderDate} 08:30:00`,
+              rec.resultCompletedDatetime || `${rec.orderDate} 09:30:00`,
+              rec.tatMinutes,
+              target.target_minutes,
+              isCompliant ? 1 : 0
+            );
+            tIdx += 9;
+          }
+        }
+
+        if (examPlaceholders.length > 0) {
+          await query(`
+            INSERT INTO examinations (
+              id, user_id, patient_id, source_file_id, batch_id, registration_number,
+              order_date, registration_datetime, unit_name, unit_type, guarantor, doctor_name, status
+            ) VALUES ${examPlaceholders.join(', ')}
+            ON CONFLICT (id) DO NOTHING
+          `, examValues);
+        }
+
+        if (labPlaceholders.length > 0) {
+          await query(`
+            INSERT INTO laboratory_results (id, examination_id, test_name, category, result_value, flag)
+            VALUES ${labPlaceholders.join(', ')}
+            ON CONFLICT (id) DO NOTHING
+          `, labValues);
+        }
+
+        if (tatPlaceholders.length > 0) {
+          await query(`
+            INSERT INTO tat_records (
+              id, examination_id, category, service_type, start_time, end_time,
+              duration_minutes, target_minutes, is_compliant
+            ) VALUES ${tatPlaceholders.join(', ')}
+            ON CONFLICT (id) DO NOTHING
+          `, tatValues);
+        }
+      }
+
+      console.log(`Successfully synced ${records.length} records to Supabase PostgreSQL.`);
+    } catch (pgErr: any) {
+      console.warn('Postgres batch sync notice:', pgErr.message);
+    }
   }
 }
 

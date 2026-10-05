@@ -19,7 +19,7 @@ router.get('/auth/me', authenticate, authCtrl.getMe);
 
 // Upload routes
 router.post('/upload/preview', authenticate, uploadMiddleware.single('file'), uploadCtrl.previewUpload);
-router.post('/upload/confirm', authenticate, uploadCtrl.confirmImport);
+router.post('/upload/confirm', authenticate, uploadMiddleware.single('file'), uploadCtrl.confirmImport);
 router.get('/upload/history', authenticate, uploadCtrl.getUploadHistory);
 router.get('/upload/errors/:batchId', authenticate, uploadCtrl.getBatchErrors);
 

@@ -60,15 +60,20 @@ export const UploadPage: React.FC = () => {
     setImporting(true);
     setErrorMsg(null);
     try {
-      const res = await api.post('/upload/confirm', {
-        tempFileId: previewData.tempFileId,
-        originalFileName: previewData.originalFileName,
-        mimeType: previewData.mimeType,
-        customMapping,
-        sheetName: previewData.activeSheet,
-        duplicateAction
-      }, {
-        timeout: 120000
+      const formData = new FormData();
+      if (selectedFile) {
+        formData.append('file', selectedFile);
+      }
+      formData.append('tempFileId', previewData.tempFileId || '');
+      formData.append('originalFileName', previewData.originalFileName || '');
+      formData.append('mimeType', previewData.mimeType || '');
+      formData.append('customMapping', JSON.stringify(customMapping));
+      formData.append('sheetName', previewData.activeSheet || '');
+      formData.append('duplicateAction', duplicateAction);
+
+      const res = await api.post('/upload/confirm', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 180000
       });
       setImportResult(res.data);
     } catch (err: any) {
@@ -162,7 +167,7 @@ export const UploadPage: React.FC = () => {
                 Langkah 2: Verifikasi Smart Mapping
               </span>
               <h4 className="mt-2 text-base font-bold text-slate-800">
-                {previewData.originalFileName} ({previewData.totalRows || 'Banyak'} Baris Terdeteksi)
+                {previewData.originalFileName} ({previewData.totalRows ? `${previewData.totalRows.toLocaleString()} Baris Terdeteksi` : 'Data Terdeteksi'})
               </h4>
               <p className="text-xs text-slate-500">
                 Periksa kesesuaian kolom file mentah dengan field canonical database laboratorium.
@@ -254,6 +259,8 @@ export const UploadPage: React.FC = () => {
                             <option value="examinations">Pemeriksaan Lab (examinations)</option>
                             <option value="origin_unit">Asal Pasien / Ruangan (origin_unit)</option>
                             <option value="medical_record_number">No. Rekam Medis (No RM)</option>
+                            <option value="registration_number">No. Registrasi / No. Lab</option>
+                            <option value="tat_minutes">Turn Around Time (TAT Menit)</option>
                             <option value="guarantor">Penjamin / Jaminan (guarantor)</option>
                           </select>
                         </td>

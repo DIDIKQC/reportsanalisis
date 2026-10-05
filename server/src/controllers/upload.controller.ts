@@ -1,10 +1,12 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { excelParser } from '../services/parser/excel.parser';
+import { pdfParser } from '../services/parser/pdf.parser';
 import { smartColumnMapper } from '../services/parser/mapper';
 import { ingestService } from '../services/parser/ingest.service';
 import db from '../db/database';
 import path from 'path';
+import fs from 'fs';
 
 export const previewUpload = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -36,15 +38,23 @@ export const previewUpload = async (req: AuthenticatedRequest, res: Response) =>
       });
     } else {
       // PDF File preview
+      const preview = await pdfParser.previewLaboratoryPDF(filePath);
       return res.json({
         tempFileId: path.basename(filePath),
         originalFileName: req.file.originalname,
         mimeType: req.file.mimetype,
         isPDF: true,
-        message: 'File PDF terdeteksi. Sistem siap melakukan ekstraksi terstruktur otomatis.'
+        sheets: [`Dokumen PDF (${preview.totalPages} Halaman)`],
+        activeSheet: 'Dokumen PDF',
+        totalRows: preview.totalRows,
+        headers: preview.headers,
+        mapping: preview.mapping,
+        sampleRecords: preview.sampleRecords,
+        message: 'File PDF terdeteksi. Sistem berhasil membaca struktur data laporan.'
       });
     }
   } catch (err: any) {
+    console.error('previewUpload error:', err);
     return res.status(400).json({
       error: `File tidak dapat diproses: ${err.message}. Periksa format kolom dan lembar kerja Anda.`
     });
@@ -54,25 +64,59 @@ export const previewUpload = async (req: AuthenticatedRequest, res: Response) =>
 export const confirmImport = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { tempFileId, originalFileName, mimeType, customMapping, sheetName, duplicateAction } = req.body;
-    if (!tempFileId) {
-      return res.status(400).json({ error: 'tempFileId wajib disertakan.' });
+
+    let fullTempPath = '';
+
+    // 1. Check if file was sent directly via multipart form
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      fullTempPath = req.file.path;
+    } else if (tempFileId) {
+      // 2. Search all potential storage paths
+      const isVercel = !!process.env.VERCEL;
+      const candidates = [
+        path.resolve(isVercel ? '/tmp/storage/uploads' : (process.env.STORAGE_LOCAL_DIR ? path.resolve(process.env.STORAGE_LOCAL_DIR, 'uploads') : './storage/uploads'), tempFileId),
+        path.resolve('/tmp/storage/uploads', tempFileId),
+        path.resolve(process.cwd(), './storage/uploads', tempFileId),
+        path.resolve(process.cwd(), '../server/storage/uploads', tempFileId),
+        path.resolve(process.cwd(), 'uploads', tempFileId)
+      ];
+
+      for (const cand of candidates) {
+        if (fs.existsSync(cand)) {
+          fullTempPath = cand;
+          break;
+        }
+      }
     }
 
-    const uploadDir = path.resolve(process.cwd(), process.env.STORAGE_LOCAL_DIR || './storage', 'uploads');
-    const fullTempPath = path.join(uploadDir, tempFileId);
+    if (!fullTempPath || !fs.existsSync(fullTempPath)) {
+      return res.status(400).json({
+        error: `Berkas file sementara '${tempFileId || ''}' tidak ditemukan di server. Silakan pilih kembali file untuk diunggah ulang.`
+      });
+    }
+
+    let parsedCustomMapping = customMapping;
+    if (typeof customMapping === 'string') {
+      try {
+        parsedCustomMapping = JSON.parse(customMapping);
+      } catch {
+        parsedCustomMapping = undefined;
+      }
+    }
 
     const result = await ingestService.processUpload({
       tempFilePath: fullTempPath,
-      originalFileName: originalFileName || tempFileId,
-      mimeType: mimeType || 'application/octet-stream',
+      originalFileName: originalFileName || (req.file ? req.file.originalname : tempFileId),
+      mimeType: mimeType || (req.file ? req.file.mimetype : 'application/octet-stream'),
       uploadedBy: req.user?.id || 'usr-adminlab',
-      customMapping,
+      customMapping: parsedCustomMapping,
       sheetName,
       duplicateAction: duplicateAction || 'SKIP'
     });
 
     return res.json(result);
   } catch (err: any) {
+    console.error('confirmImport error:', err);
     return res.status(500).json({
       error: `Gagal mengimpor data ke database: ${err.message}`
     });
