@@ -1,17 +1,17 @@
 {
   "version": 2,
-  "installCommand": "npm --prefix client install",
+  "installCommand": "npm install && npm --prefix client install",
   "buildCommand": "npm --prefix client run build",
   "outputDirectory": "client/dist",
   "framework": "vite",
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://items-extended-briefing-customers.trycloudflare.com/api/$1"
+      "destination": "/api"
     },
     {
       "source": "/storage/(.*)",
-      "destination": "https://items-extended-briefing-customers.trycloudflare.com/storage/$1"
+      "destination": "/api"
     },
     {
       "source": "/(.*)",

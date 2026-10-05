@@ -26,10 +26,18 @@ export class GoogleDriveService {
 
   constructor() {
     this.baseFolderId = process.env.GOOGLE_DRIVE_FOLDER_ID || '1MsmBzz5dVW0jzK-ocWsyKh2DQ0Q9OZ1x';
-    this.localMirrorBase = path.resolve(process.cwd(), process.env.STORAGE_LOCAL_DIR || './storage', 'google_drive_mirror');
+    const isVercel = !!process.env.VERCEL;
+    const baseStorage = isVercel
+      ? '/tmp/storage'
+      : path.resolve(process.cwd(), process.env.STORAGE_LOCAL_DIR || './storage');
+    this.localMirrorBase = path.resolve(baseStorage, 'google_drive_mirror');
 
-    if (!fs.existsSync(this.localMirrorBase)) {
-      fs.mkdirSync(this.localMirrorBase, { recursive: true });
+    try {
+      if (!fs.existsSync(this.localMirrorBase)) {
+        fs.mkdirSync(this.localMirrorBase, { recursive: true });
+      }
+    } catch (e) {
+      console.warn('Could not create local mirror directory:', e);
     }
 
     this.initDriveClient();
@@ -78,8 +86,12 @@ export class GoogleDriveService {
 
     // Local mirror target folder: storage/google_drive_mirror/2026/01-Januari/RAW/
     const mirrorDir = path.join(this.localMirrorBase, year.toString(), monthStr, 'RAW');
-    if (!fs.existsSync(mirrorDir)) {
-      fs.mkdirSync(mirrorDir, { recursive: true });
+    try {
+      if (!fs.existsSync(mirrorDir)) {
+        fs.mkdirSync(mirrorDir, { recursive: true });
+      }
+    } catch (e) {
+      console.warn('Could not create mirror subfolder:', e);
     }
 
     const uniquePrefix = Date.now();

@@ -70,9 +70,13 @@ ${req.contextNote ? `Catatan Tambahan: ${req.contextNote}` : ''}
         summary: parsed.summary || 'Ringkasan kinerja laboratorium periode ini menunjukkan operasional berjalan stabil sesuai standar mutu.',
         findings: parsed.findings || [
           `Total pemeriksaan mencapai ${req.aggregatedMetrics.totalExaminations} tindakan.`,
-          `Tingkat kepatuhan TAT tercatat ${req.aggregatedMetrics.tatComplianceRate.toFixed(1)}%.`
+          req.aggregatedMetrics.tatComplianceRate != null
+            ? `Tingkat kepatuhan TAT tercatat ${req.aggregatedMetrics.tatComplianceRate.toFixed(1)}%.`
+            : `Data waktu tunggu TAT tidak tersedia pada berkas laporan.`
         ],
-        comparison: parsed.comparison || `Kepatuhan standar mutu TAT ${req.aggregatedMetrics.tatComplianceRate >= 80 ? 'memenuhi' : 'di bawah'} ambang batas target nasional (>80%).`,
+        comparison: parsed.comparison || (req.aggregatedMetrics.tatComplianceRate != null
+          ? `Kepatuhan standar mutu TAT ${req.aggregatedMetrics.tatComplianceRate >= 80 ? 'memenuhi' : 'di bawah'} ambang batas target nasional (>80%).`
+          : 'Indikator mutu TAT belum dapat dibandingkan karena ketiadaan data waktu.'),
         recommendations: parsed.recommendations || [
           'Pertahankan kontinuitas pemeliharaan alat dan validasi berkala.',
           'Lakukan evaluasi alur pra-analitik pada unit dengan kontribusi sampel tertinggi.'

@@ -19,9 +19,17 @@ export async function populateSampleDataIfEmpty() {
 
   console.log('Populating initial laboratory dataset from uploaded Rajal & Ranap source files...');
 
-  const uploadsDir = path.resolve(process.cwd(), process.env.STORAGE_LOCAL_DIR || './storage', 'uploads');
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
+  const isVercel = !!process.env.VERCEL;
+  const baseStorage = isVercel
+    ? '/tmp/storage'
+    : path.resolve(process.cwd(), process.env.STORAGE_LOCAL_DIR || './storage');
+  const uploadsDir = path.resolve(baseStorage, 'uploads');
+  try {
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+  } catch (e) {
+    console.warn('Could not create uploads directory in sample importer:', e);
   }
 
   // 1. Prepare Rawat Jalan Sample CSV

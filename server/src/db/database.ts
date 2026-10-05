@@ -5,8 +5,11 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const dbPath = process.env.DATABASE_PATH || './data/laboratory.sqlite';
-const resolvedPath = path.resolve(process.cwd(), dbPath);
+const isVercel = !!process.env.VERCEL;
+const dbPath = isVercel 
+  ? '/tmp/laboratory.sqlite' 
+  : (process.env.DATABASE_PATH || './data/laboratory.sqlite');
+const resolvedPath = isVercel ? '/tmp/laboratory.sqlite' : path.resolve(process.cwd(), dbPath);
 
 // Ensure directory exists
 const dbDir = path.dirname(resolvedPath);
@@ -18,8 +21,12 @@ export const db = new Database(resolvedPath, {
   verbose: process.env.NODE_ENV === 'development' ? undefined : undefined
 });
 
-// Enable WAL mode & foreign keys for high performance and integrity
-db.pragma('journal_mode = WAL');
+// Enable journal mode & foreign keys for high performance and integrity
+if (!isVercel) {
+  db.pragma('journal_mode = WAL');
+} else {
+  db.pragma('journal_mode = MEMORY');
+}
 db.pragma('foreign_keys = ON');
 
 export default db;

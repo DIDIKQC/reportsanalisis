@@ -3,8 +3,9 @@ export interface AIAnalysisRequest {
   aggregatedMetrics: {
     totalPatients: number;
     totalExaminations: number;
-    tatComplianceRate: number;
-    tatNonComplianceRate: number;
+    hasTATData?: boolean;
+    tatComplianceRate?: number | null;
+    tatNonComplianceRate?: number | null;
     previousPeriodCompliance?: number;
     originBreakdown?: Record<string, number>;
     categoryBreakdown?: Record<string, number>;

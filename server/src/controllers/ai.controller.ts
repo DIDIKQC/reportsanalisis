@@ -32,6 +32,7 @@ export const runAIAnalysis = async (req: AuthenticatedRequest, res: Response) =>
       aggregatedMetrics: {
         totalPatients: kpis.totalPatients,
         totalExaminations: kpis.totalExaminations,
+        hasTATData: kpis.hasTATData,
         tatComplianceRate: kpis.tatComplianceRate,
         tatNonComplianceRate: kpis.tatNonComplianceRate,
         originBreakdown: originsMap,
